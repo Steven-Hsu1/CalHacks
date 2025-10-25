@@ -1,0 +1,13 @@
+# vim files 
+*~ 
+*swp 
+
+# env 
+venv/
+.env
+
+# python 
+__pycache__
+*.pyc
+
+
