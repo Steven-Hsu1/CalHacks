@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Content Filter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Content Filter</h1>
+    <p class="subtitle">Control what you see</p>
+
+    <div class="status">
+      <span id="status-indicator" class="indicator"></span>
+      <span id="status-text">Disconnected</span>
+    </div>
+
+    <!-- Error message display -->
+    <div id="error-message" class="error-message" style="display: none;"></div>
+
+    <!-- Help text for permissions -->
+    <div class="help-text" id="help-text" style="display: none;">
+      <p><strong>📺 How to Select the Right Tab</strong></p>
+      <ol style="margin: 8px 0 0 20px; padding: 0; font-size: 12px; line-height: 1.6;">
+        <li><strong>A picker will appear</strong> - this is Chrome's screen sharing dialog</li>
+        <li><strong>Click the "Tab" button</strong> at the top of the picker</li>
+        <li><strong>Look for your social media tab</strong> (TikTok, YouTube, Instagram, etc.) in the list</li>
+        <li><strong>Ignore the preview image</strong> if it looks blank - select by the tab NAME</li>
+        <li><strong>Click "Share"</strong> to start monitoring</li>
+      </ol>
+      <p style="margin-top: 8px; font-size: 12px;"><em>💡 Tip: The tab you want to monitor should already be open before clicking "Start Monitoring"</em></p>
+    </div>
+
+    <div class="section">
+      <label for="trigger-input">What don't you want to see?</label>
+      <textarea
+        id="trigger-input"
+        placeholder="e.g., smoking, violence, specific topics..."
+        rows="3"
+      ></textarea>
+      <button id="add-trigger">Add Filter</button>
+    </div>
+
+    <div class="section">
+      <h3>Active Filters</h3>
+      <ul id="trigger-list" class="trigger-list"></ul>
+    </div>
+
+    <div class="section">
+      <button id="toggle-monitoring" class="primary">Start Monitoring</button>
+    </div>
+
+    <div class="stats">
+      <p>Filtered: <span id="filtered-count">0</span> items</p>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
