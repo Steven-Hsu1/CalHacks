@@ -304,9 +304,20 @@ async function executeClick(selector, coordinates, method = null, fallback = nul
         console.log('[Content] Click function called:', { sel, clickMethod, fallbackAction });
 
         // Helper function to find and click element
-        function findAndClick(selector) {
+        function findAndClick(selector, useSecondButton = false) {
           try {
-            const element = document.querySelector(selector);
+            // Use querySelectorAll to get all matching elements
+            const elements = document.querySelectorAll(selector);
+
+            // Choose the appropriate element based on context
+            let element;
+            if (useSecondButton && elements.length > 1) {
+              element = elements[1];  // Use second button (for TikTok down arrow)
+              console.log('[Content] Using second button of', elements.length, 'found');
+            } else {
+              element = elements[0];  // Use first button (default)
+            }
+
             if (element) {
               // Check if element is visible
               const rect = element.getBoundingClientRect();
@@ -320,11 +331,11 @@ async function executeClick(selector, coordinates, method = null, fallback = nul
                 // Scroll into view instantly (no animation)
                 element.scrollIntoView({ behavior: 'instant', block: 'center' });
 
-                // Click immediately or with minimal delay
+                // Click immediately with minimal delay
                 setTimeout(() => {
                   element.click();
                   console.log('[Content] ✅ Clicked:', selector);
-                }, 50);  // Reduced to 50ms for faster response
+                }, 10);  // Reduced to 10ms for fastest response
 
                 return true;
               } else {
@@ -343,6 +354,7 @@ async function executeClick(selector, coordinates, method = null, fallback = nul
 
           // Try to find and click next button
           // TikTok next video button classes: TUXButton TUXButton--capsule TUXButton--medium TUXButton--secondary action-item css-16m89jc
+          // IMPORTANT: Use the SECOND button with this class (it's the down arrow)
           const nextButtonSelectors = [
             'button.TUXButton.TUXButton--capsule.TUXButton--medium.TUXButton--secondary.action-item.css-16m89jc',
             sel,  // Also try the provided selector from agent
@@ -350,8 +362,11 @@ async function executeClick(selector, coordinates, method = null, fallback = nul
           ];
 
           let found = false;
-          for (const selector of nextButtonSelectors) {
-            if (findAndClick(selector)) {
+          for (let i = 0; i < nextButtonSelectors.length; i++) {
+            const selector = nextButtonSelectors[i];
+            // Use second button for the primary TikTok selector
+            const useSecond = (i === 0);  // First selector needs second button
+            if (findAndClick(selector, useSecond)) {
               found = true;
               break;
             }
@@ -380,7 +395,7 @@ async function executeClick(selector, coordinates, method = null, fallback = nul
         // Handle standard TikTok clicks (3-dots, not interested, etc.)
         if (sel) {
           console.log('[Content] Attempting to click selector:', sel);
-          if (findAndClick(sel)) {
+          if (findAndClick(sel, false)) {  // Use first button for standard clicks
             console.log('[Content] ✅ Successfully clicked:', sel);
             return { success: true, clicked: true, selector: sel };
           } else {
