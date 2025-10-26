@@ -324,4 +324,61 @@ window.highlightElement = function(selector) {
 // Export query function for debugging
 window.queryContentFilterDOM = queryDOM;
 
+// ============================================================
+// URL Tracking - Monitor URL changes and notify background
+// ============================================================
+
+let lastKnownURL = window.location.href;
+
+// Track URL changes (for SPA navigation like TikTok, YouTube, Instagram)
+function trackURLChanges() {
+  const currentURL = window.location.href;
+
+  if (currentURL !== lastKnownURL) {
+    console.log('Content Filter: URL changed:', currentURL);
+    lastKnownURL = currentURL;
+
+    // Notify background script of URL change
+    if (checkExtensionContext()) {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'URL_CHANGED',
+          url: currentURL,
+          platform: getPlatform(window.location.hostname)
+        }).catch(error => {
+          // Ignore errors if extension is reloading
+          if (!error.message.includes('Extension context invalidated')) {
+            console.error('Content Filter: Failed to send URL update:', error);
+          }
+        });
+      } catch (e) {
+        // Extension context invalidated, ignore
+      }
+    }
+  }
+}
+
+// Check URL changes every 500ms (fast enough for user navigation)
+setInterval(trackURLChanges, 500);
+
+// Also track on history changes (for proper pushState/replaceState detection)
+const originalPushState = history.pushState;
+const originalReplaceState = history.replaceState;
+
+history.pushState = function(...args) {
+  originalPushState.apply(this, args);
+  setTimeout(trackURLChanges, 0);
+};
+
+history.replaceState = function(...args) {
+  originalReplaceState.apply(this, args);
+  setTimeout(trackURLChanges, 0);
+};
+
+// Track on popstate (back/forward navigation)
+window.addEventListener('popstate', () => {
+  setTimeout(trackURLChanges, 0);
+});
+
 console.log('Content Filter: Content script initialized for', getPlatform(window.location.hostname));
+console.log('Content Filter: URL tracking enabled');

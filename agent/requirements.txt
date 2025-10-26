@@ -1,9 +1,9 @@
 # LiveKit dependencies
 livekit>=0.11.0
-livekit-agents[anthropic]>=1.2
+livekit-agents>=1.2
 
-#LLM
-anthropic>=0.71.0
+# LLM - OpenAI for vision
+openai>=1.30.0
 
 # Image processing
 pillow>=10.0.0

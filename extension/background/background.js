@@ -48,7 +48,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'CLICK_ELEMENT':
-      executeClick(message.selector, message.coordinates, message.tabId).then(() => {
+      executeClick(message.selector, message.coordinates, message.method, message.fallback).then(() => {
         sendResponse({ success: true });
       });
       return true;
@@ -75,6 +75,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'AGENT_MESSAGE':
       handleAgentMessage(message.message);
+      break;
+
+    case 'URL_CHANGED':
+      handleURLChange(message.url, message.platform);
       break;
   }
 
@@ -117,7 +121,9 @@ async function closeOffscreenDocument() {
 // Start monitoring current tab
 async function handleStartMonitoring(tabId) {
   try {
+    console.log('[Background] ========================================');
     console.log('[Background] 🎬 Starting monitoring...');
+    console.log('[Background] ========================================');
 
     if (isMonitoring) {
       console.log('[Background] ⚠️  Already monitoring');
@@ -126,6 +132,7 @@ async function handleStartMonitoring(tabId) {
 
     // Get current tab if not provided
     if (!tabId) {
+      console.log('[Background] 🔍 Looking for active tab...');
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       tabId = tabs[0]?.id;
       console.log('[Background] 📍 Selected current tab:', tabId);
@@ -136,6 +143,13 @@ async function handleStartMonitoring(tabId) {
     }
 
     currentTabId = tabId;
+
+    // Get current tab URL for agent to use with MCP
+    console.log('[Background] 🔍 Getting tab information...');
+    const tab = await chrome.tabs.get(currentTabId);
+    const tabUrl = tab.url || '';
+    console.log('[Background] 📍 Tab URL:', tabUrl);
+    console.log('[Background] 📋 Tab title:', tab.title);
 
     // Using getDisplayMedia approach - no need for stream ID
     // The offscreen document will show a picker for user to select tab
@@ -157,7 +171,8 @@ async function handleStartMonitoring(tabId) {
     try {
       response = await chrome.runtime.sendMessage({
         type: 'START_CAPTURE',
-        triggers: triggers
+        triggers: triggers,
+        url: tabUrl  // Pass the URL to offscreen
       });
     } catch (error) {
       console.error('[Background] ❌ Failed to communicate with offscreen document:', error);
@@ -209,6 +224,8 @@ async function handleStopMonitoring() {
 // Fetch LiveKit access token from local token server
 async function fetchLiveKitToken() {
   try {
+    console.log('[Background] 📤 Fetching token from http://localhost:3000/token...');
+
     const response = await fetch('http://localhost:3000/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -218,17 +235,27 @@ async function fetchLiveKitToken() {
       })
     });
 
+    console.log('[Background] 📥 Token server response status:', response.status);
+
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[Background] ❌ Token server error response:', errorText);
       throw new Error(`Token server returned ${response.status}: ${response.statusText}`);
     }
 
     const data = await response.json();
     console.log('[Background] ✅ Got LiveKit token for room:', data.room);
+    console.log('[Background] 🔑 Token length:', data.token?.length || 0);
+    console.log('[Background] 👤 Identity:', data.identity);
     return data.token;
 
   } catch (error) {
     console.error('[Background] ❌ Failed to fetch LiveKit token:', error);
-    console.error('Make sure the token server is running: node token-server.js');
+    console.error('[Background] 🔧 TROUBLESHOOTING:');
+    console.error('  1. Is token server running? Run: node extension/token-server.js');
+    console.error('  2. Check if port 3000 is available');
+    console.error('  3. Verify .env file has LIVEKIT_API_KEY and LIVEKIT_API_SECRET');
+    console.error('  4. Check terminal running token-server.js for errors');
     throw error;
   }
 }
@@ -239,7 +266,7 @@ async function handleAgentMessage(message) {
 
   switch (message.type) {
     case 'CLICK_ELEMENT':
-      await executeClick(message.selector, message.coordinates);
+      await executeClick(message.selector, message.coordinates, message.method, message.fallback);
       break;
 
     case 'TRIGGER_DETECTED':
@@ -252,53 +279,219 @@ async function handleAgentMessage(message) {
       await executeScroll(message.scroll_type, message.selector, message.scroll_amount, message.platform);
       break;
 
+    case 'NAVIGATE_NEXT':
+      await executeNavigation(message.action, message.target, message.platform);
+      break;
+
     default:
       console.warn('[Background] Unknown message type:', message.type);
   }
 }
 
-// Execute click on element
-async function executeClick(selector, coordinates) {
+// Execute click on element with TikTok-specific handling
+async function executeClick(selector, coordinates, method = null, fallback = null) {
   if (!currentTabId) {
-    console.error('No current tab to execute click');
+    console.error('[Background] No current tab to execute click');
     return;
   }
 
   try {
-    console.log('Executing click:', { selector, coordinates });
+    console.log('[Background] 👆 Executing click command...', { selector, method, fallback });
 
     const results = await chrome.scripting.executeScript({
       target: { tabId: currentTabId },
-      func: (sel, coords) => {
-        let element;
+      func: (sel, coords, clickMethod, fallbackAction) => {
+        console.log('[Content] Click function called:', { sel, clickMethod, fallbackAction });
 
+        // Helper function to find and click element
+        function findAndClick(selector) {
+          try {
+            const element = document.querySelector(selector);
+            if (element) {
+              // Check if element is visible
+              const rect = element.getBoundingClientRect();
+              const isVisible = element.offsetParent !== null &&
+                             rect.width > 0 &&
+                             rect.height > 0;
+
+              if (isVisible) {
+                console.log('[Content] Found visible element:', selector);
+
+                // Scroll into view instantly (no animation)
+                element.scrollIntoView({ behavior: 'instant', block: 'center' });
+
+                // Click immediately or with minimal delay
+                setTimeout(() => {
+                  element.click();
+                  console.log('[Content] ✅ Clicked:', selector);
+                }, 50);  // Reduced to 50ms for faster response
+
+                return true;
+              } else {
+                console.log('[Content] Element found but not visible:', selector);
+              }
+            }
+          } catch (e) {
+            console.error('[Content] Error with selector:', selector, e);
+          }
+          return false;
+        }
+
+        // Handle TikTok next video with fallback to scroll
+        if (clickMethod === 'tiktok_next_video') {
+          console.log('[Content] TikTok next video navigation');
+
+          // Try to find and click next button
+          // TikTok next video button classes: TUXButton TUXButton--capsule TUXButton--medium TUXButton--secondary action-item css-16m89jc
+          const nextButtonSelectors = [
+            'button.TUXButton.TUXButton--capsule.TUXButton--medium.TUXButton--secondary.action-item.css-16m89jc',
+            sel,  // Also try the provided selector from agent
+            'button[data-e2e="arrow-right"]'  // Legacy fallback
+          ];
+
+          let found = false;
+          for (const selector of nextButtonSelectors) {
+            if (findAndClick(selector)) {
+              found = true;
+              break;
+            }
+          }
+
+          // If no button found, use fallback (keyboard navigation for TikTok)
+          if (!found && fallbackAction === 'scroll_down') {
+            console.log('[Content] No next button found, using Down Arrow key for TikTok navigation');
+            // TikTok uses Down Arrow to go to next video
+            const event = new KeyboardEvent('keydown', {
+              key: 'ArrowDown',
+              code: 'ArrowDown',
+              keyCode: 40,
+              which: 40,
+              bubbles: true,
+              cancelable: true
+            });
+            document.dispatchEvent(event);
+            console.log('[Content] ✅ Sent Down Arrow key press');
+            return { success: true, clicked: false, action: 'keyboard_navigation' };
+          }
+
+          return { success: found, clicked: found };
+        }
+
+        // Handle standard TikTok clicks (3-dots, not interested, etc.)
         if (sel) {
-          element = document.querySelector(sel);
-        } else if (coords) {
-          element = document.elementFromPoint(coords.x, coords.y);
+          console.log('[Content] Attempting to click selector:', sel);
+          if (findAndClick(sel)) {
+            console.log('[Content] ✅ Successfully clicked:', sel);
+            return { success: true, clicked: true, selector: sel };
+          } else {
+            console.log('[Content] ⚠️  Could not find element with selector:', sel);
+          }
         }
 
-        if (element) {
-          // Scroll element into view
-          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-          // Wait a bit for scroll, then click
-          setTimeout(() => {
+        // Try coordinates if provided
+        if (coords) {
+          const element = document.elementFromPoint(coords.x, coords.y);
+          if (element) {
             element.click();
-            console.log('Clicked element:', element);
-          }, 300);
-
-          return { success: true, clicked: true };
+            return { success: true, clicked: true, method: 'coordinates' };
+          }
         }
 
+        console.log('[Content] ❌ Could not find or click element');
         return { success: false, clicked: false, error: 'Element not found' };
       },
-      args: [selector, coordinates]
+      args: [selector, coordinates, method, fallback]
     });
 
-    console.log('Click execution result:', results[0]?.result);
+    const result = results[0]?.result;
+    if (result?.success) {
+      if (result.action === 'scrolled') {
+        console.log('[Background] ✅ Scrolled to next video (button not found)');
+      } else {
+        console.log('[Background] ✅ Successfully clicked element');
+      }
+    } else {
+      console.log('[Background] ⚠️  Could not find or click element:', result?.error);
+    }
   } catch (error) {
-    console.error('Failed to execute click:', error);
+    console.error('[Background] ❌ Failed to execute click:', error);
+  }
+}
+
+// Execute navigation action (AI-powered)
+async function executeNavigation(action, target, platform) {
+  if (!currentTabId) {
+    console.error('[Background] No current tab to execute navigation');
+    return;
+  }
+
+  try {
+    console.log(`[Background] 🧭 Navigating: ${action} ${target} on ${platform}`);
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: currentTabId },
+      func: (actionType, targetValue, platformName) => {
+        console.log(`[Content] Navigation: ${actionType} ${targetValue}`);
+
+        if (actionType === 'key') {
+          // Send keyboard event
+          const event = new KeyboardEvent('keydown', {
+            key: targetValue,
+            code: targetValue,
+            bubbles: true,
+            cancelable: true
+          });
+          document.dispatchEvent(event);
+
+          // Also send keyup
+          const eventUp = new KeyboardEvent('keyup', {
+            key: targetValue,
+            code: targetValue,
+            bubbles: true,
+            cancelable: true
+          });
+          document.dispatchEvent(eventUp);
+
+          console.log(`[Content] ✅ Sent keyboard event: ${targetValue}`);
+          return { success: true, action: 'key', target: targetValue };
+
+        } else if (actionType === 'scroll') {
+          // Scroll the page
+          const distance = targetValue === 'down' ? window.innerHeight : -window.innerHeight;
+          window.scrollBy({
+            top: distance,
+            behavior: 'smooth'
+          });
+
+          console.log(`[Content] ✅ Scrolled ${targetValue}`);
+          return { success: true, action: 'scroll', target: targetValue };
+
+        } else if (actionType === 'click') {
+          // Find and click element by selector
+          const element = document.querySelector(targetValue);
+          if (element) {
+            element.click();
+            console.log(`[Content] ✅ Clicked: ${targetValue}`);
+            return { success: true, action: 'click', target: targetValue };
+          } else {
+            console.log(`[Content] ❌ Element not found: ${targetValue}`);
+            return { success: false, error: 'Element not found' };
+          }
+        }
+
+        return { success: false, error: 'Unknown action type' };
+      },
+      args: [action, target, platform]
+    });
+
+    const result = results[0]?.result;
+    if (result?.success) {
+      console.log(`[Background] ✅ Navigation successful: ${result.action} ${result.target}`);
+    } else {
+      console.log(`[Background] ⚠️  Navigation failed:`, result?.error);
+    }
+  } catch (error) {
+    console.error('[Background] ❌ Failed to execute navigation:', error);
   }
 }
 
@@ -378,6 +571,31 @@ async function executeScroll(scrollType, selector, scrollAmount, platform) {
     console.log('Scroll execution result:', results[0]?.result);
   } catch (error) {
     console.error('Failed to execute scroll:', error);
+  }
+}
+
+// Handle URL changes from content script
+async function handleURLChange(url, platform) {
+  console.log('[Background] 📍 URL changed:', url);
+  console.log('[Background] 📍 Platform:', platform);
+
+  // Only forward URL updates if we're currently monitoring
+  if (!isMonitoring) {
+    console.log('[Background] ⚠️  Not monitoring, ignoring URL change');
+    return;
+  }
+
+  try {
+    // Forward URL update to offscreen document
+    await chrome.runtime.sendMessage({
+      type: 'URL_UPDATE',
+      url: url,
+      platform: platform
+    });
+    console.log('[Background] ✅ URL update sent to offscreen document');
+  } catch (error) {
+    console.error('[Background] ❌ Failed to send URL update:', error);
+    // Extension might be reloading, ignore
   }
 }
 

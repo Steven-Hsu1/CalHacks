@@ -7,14 +7,15 @@ import asyncio
 import logging
 import os
 import json
+from typing import Optional
 from dotenv import load_dotenv
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli
 
 from video_analyzer import VideoAnalyzer
-from mcp_client import MCPClient
 from command_sender import CommandSender
 from scroll_handler import ScrollHandler
+from ai_navigator import AINavigator
 import time
 
 load_dotenv()
@@ -23,6 +24,13 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+# Suppress verbose logging from libraries to avoid image data in logs
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,23 +42,34 @@ class ContentFilterAgent:
         # Don't initialize these here - they will be initialized lazily in entrypoint
         # to avoid pickling issues in dev mode
         self.video_analyzer = None
-        self.mcp_client = None
         self.command_sender = None
         self.scroll_handler = None
+        self.ai_navigator = None
         self.processing_frame = False
         self.current_url = None  # Track the current page URL
         self.last_scroll_time = time.time()
+
+        # Time-based video tracking for auto-looping platforms (like TikTok)
+        self.video_start_time = time.time()
+        # TikTok videos are typically 15-60s, default to 15s for faster navigation
+        self.max_video_watch_duration = float(os.getenv("MAX_VIDEO_WATCH_DURATION", "15"))
 
     async def entrypoint(self, ctx: JobContext):
         """Agent entry point when participant joins room"""
         # Initialize components here (after multiprocessing fork in dev mode)
         if self.video_analyzer is None:
             self.video_analyzer = VideoAnalyzer()
-            self.mcp_client = MCPClient()
             self.command_sender = CommandSender()
             self.scroll_handler = ScrollHandler()
+            self.ai_navigator = AINavigator()
 
         logger.info(f"Starting Content Filter Agent for room {ctx.room.name}")
+
+        # Log that we're using extension for all actions
+        logger.info("✅ Using Chrome extension for all click actions (TikTok-optimized)")
+
+        # Log video watch duration configuration
+        logger.info(f"⏱️  Max video watch duration: {self.max_video_watch_duration}s (auto-navigate after this time)")
 
         # Connect to the room
         await ctx.connect()
@@ -149,7 +168,7 @@ class ContentFilterAgent:
         frame_count = 0
         processed_count = 0
         last_processed_time = 0
-        fps_limit = 1  # Process 1 frame per second
+        fps_limit = 2  # Process 2 frames per second for faster response
 
         async for frame_event in video_stream:
             try:
@@ -169,8 +188,7 @@ class ContentFilterAgent:
                 last_processed_time = current_time
                 processed_count += 1
 
-                logger.info(f"🎬 Processing frame {processed_count} (frame #{frame_count} received)...")
-                logger.info(f"   Frame size: {frame.width}x{frame.height}")
+                logger.info(f"📤 Frame {processed_count} → OpenAI analysis...")
 
                 # Analyze frame for triggers
                 detection = await self.video_analyzer.analyze_frame(
@@ -178,117 +196,176 @@ class ContentFilterAgent:
                     self.triggers
                 )
 
-                # Log detection result
-                logger.info(f"   Analysis result: {detection.description[:100]}")
-                if not detection.trigger_detected:
-                    logger.info(f"   ✓ No trigger detected (confidence: {detection.confidence:.2f})")
+                # Log JSON response clearly
+                import json
+                result_json = {
+                    "trigger_detected": detection.trigger_detected,
+                    "trigger_name": detection.trigger_name,
+                    "confidence": round(detection.confidence, 2),
+                    "description": detection.description[:80] + "..." if len(detection.description) > 80 else detection.description
+                }
+                logger.info(f"✅ Response: {json.dumps(result_json)}")
 
                 # Handle trigger detection
                 if detection.trigger_detected:
                     logger.warning(f"🚨 TRIGGER DETECTED: {detection.trigger_name} (confidence: {detection.confidence:.2f})")
-                    logger.info(f"📝 Description: {detection.description}")
-                    logger.info(f"📍 Current URL: {self.current_url or 'NOT SET'}")
+                    logger.info(f"📍 URL: {self.current_url or 'NOT SET'}")
 
-                    # Check if URL is available for MCP
-                    if not self.current_url:
-                        logger.error("❌ No URL available - cannot use MCP! Extension must send URL.")
-                        logger.info("⚠️  Falling back to extension-based clicking...")
-                        # Fall back to extension-based clicking
+                    start_time = time.time()
+
+                    try:
+                        logger.info(f"🔧 Sending TikTok two-step 'Not interested' click commands to extension...")
+
+                        # Step 1: Send command to click the 3 dots button
+                        # TikTok button classes: TUXButton TUXButton--capsule TUXButton--medium TUXButton--secondary action-item css-7a914j
+                        three_dots_selector = 'button.TUXButton.TUXButton--capsule.TUXButton--medium.TUXButton--secondary.action-item.css-7a914j'
+                        logger.info(f"Step 1: Sending click command for 3 dots button: {three_dots_selector}")
+
                         await self.command_sender.send_click_command(
                             ctx.room,
                             participant,
-                            {"selector": None, "found": True, "method": "fallback"}
+                            {
+                                "selector": three_dots_selector,
+                                "method": "tiktok_three_dots",
+                                "text": "More actions"
+                            }
                         )
-                    else:
-                        logger.info(f"🔧 Using MCP to find and click 'Not interested' button...")
-                        # Use MCP to find and click "Not interested" button
-                        try:
-                            logger.info("🔍 Step 1: Finding 'Not interested' button via MCP...")
-                            start_time = time.time()
 
-                            click_target = await self.mcp_client.find_not_interested_button(
-                                self.current_url
-                            )
+                        logger.info("✅ Step 1 command sent - waiting for menu to appear...")
+                        await asyncio.sleep(0.4)  # Reduced wait for faster response
 
-                            find_time = time.time() - start_time
-                            logger.info(f"⏱️  Button search took {find_time:.2f}s")
+                        # Step 2: Send command to click "Not interested" in the menu
+                        not_interested_selector = 'div.TUXMenuItem[data-e2e="more-menu-popover_not-interested"]'
+                        logger.info(f"Step 2: Sending click command for 'Not interested': {not_interested_selector}")
 
-                            if click_target and click_target.get('found'):
-                                if click_target.get('method') == 'mcp' and click_target.get('selector'):
-                                    logger.info(f"✓ Found button via MCP: '{click_target.get('text')}'")
-                                    logger.info(f"🎯 Selector: {click_target.get('selector')}")
-                                    logger.info("👆 Step 2: Clicking via MCP...")
-
-                                    # Click via MCP
-                                    click_start = time.time()
-                                    success = await self.mcp_client.click_element(
-                                        self.current_url,
-                                        click_target.get('selector')
-                                    )
-                                    click_time = time.time() - click_start
-                                    logger.info(f"⏱️  Click took {click_time:.2f}s")
-
-                                    if success:
-                                        logger.info("✅ MCP CLICK SUCCESSFUL!")
-                                    else:
-                                        logger.warning("❌ MCP click failed, falling back to extension")
-                                        await self.command_sender.send_click_command(
-                                            ctx.room,
-                                            participant,
-                                            click_target
-                                        )
-                                else:
-                                    # Fallback to extension
-                                    logger.info("⚠️  MCP returned fallback method, using extension to click")
-                                    await self.command_sender.send_click_command(
-                                        ctx.room,
-                                        participant,
-                                        click_target
-                                    )
-
-                                # Notify extension about trigger detection
-                                await self.command_sender.send_trigger_notification(
-                                    ctx.room,
-                                    participant,
-                                    detection.trigger_name,
-                                    detection.confidence
-                                )
-
-                                total_time = time.time() - start_time
-                                logger.info(f"✅ Total action time: {total_time:.2f}s (find + click)")
-                            else:
-                                logger.warning("⚠️  Could not find 'Not interested' button on page")
-
-                        except Exception as e:
-                            logger.error(f"❌ Error finding or clicking button: {e}", exc_info=True)
-
-                # Handle video end detection
-                if detection.video_ended:
-                    logger.info("📽️  Video ended, preparing to scroll")
-
-                    # Check if we should scroll
-                    time_since_scroll = time.time() - self.last_scroll_time
-                    should_scroll = self.scroll_handler.should_scroll(
-                        detection.video_ended,
-                        time_since_scroll
-                    )
-
-                    if should_scroll and self.current_url:
-                        # Get scroll command for current platform
-                        scroll_config = self.scroll_handler.get_scroll_command(self.current_url)
-
-                        # Send scroll command to extension
-                        await self.command_sender.send_scroll_command(
+                        await self.command_sender.send_click_command(
                             ctx.room,
                             participant,
-                            scroll_config
+                            {
+                                "selector": not_interested_selector,
+                                "method": "tiktok_not_interested",
+                                "text": "Not interested"
+                            }
                         )
 
-                        self.last_scroll_time = time.time()
-                        logger.info("✅ Scroll command sent")
+                        logger.info("✅ Step 2 command sent - 'Not interested' click command sent!")
+
+                        # Notify extension about trigger detection
+                        await self.command_sender.send_trigger_notification(
+                            ctx.room,
+                            participant,
+                            detection.trigger_name,
+                            detection.confidence
+                        )
+
+                        elapsed = time.time() - start_time
+                        logger.info(f"✅ Click commands sent ({elapsed:.2f}s)")
+
+                    except Exception as e:
+                        logger.error(f"❌ Error sending click commands: {type(e).__name__}: {str(e)}")
+
+                # Handle video end detection - navigate ONLY if NO trigger detected
+                # TikTok-specific: Videos autoplay in a loop, skip to next after watch duration
+                time_elapsed = time.time() - self.video_start_time
+                time_based_video_end = time_elapsed >= self.max_video_watch_duration
+
+                # WORKFLOW: Only skip to next video if NO trigger was detected AND video finished
+                if (detection.video_ended or time_based_video_end) and not detection.trigger_detected:
+                    # Log which detection method triggered navigation
+                    if detection.video_ended and time_based_video_end:
+                        logger.info(f"📽️  Video ended (static frames + {time_elapsed:.1f}s watched)")
+                        logger.info(f"✅ No trigger detected - skipping to next video")
+                    elif detection.video_ended:
+                        logger.info(f"📽️  Video ended (static frames detected)")
+                        logger.info(f"✅ No trigger detected - skipping to next video")
+                    else:
+                        logger.info(f"⏱️  TikTok video watched for {time_elapsed:.1f}s (max: {self.max_video_watch_duration}s)")
+                        logger.info(f"✅ No trigger detected in this video - skipping to next")
+
+                    # Check if we should navigate (rate limiting)
+                    time_since_scroll = time.time() - self.last_scroll_time
+                    min_interval = 2.0  # Minimum 2 seconds between navigations
+
+                    if time_since_scroll < min_interval:
+                        logger.info(f"⏸️  Rate limiting: waiting {min_interval - time_since_scroll:.1f}s before next navigation")
+                    else:
+                        try:
+                            nav_start = time.time()
+
+                            logger.info("🔧 Sending next video navigation command to extension...")
+
+                            # TikTok next video button (when no trigger detected)
+                            # Button classes: TUXButton TUXButton--capsule TUXButton--medium TUXButton--secondary action-item css-16m89jc
+                            next_video_selector = 'button.TUXButton.TUXButton--capsule.TUXButton--medium.TUXButton--secondary.action-item.css-16m89jc'
+
+                            # Send click command for TikTok next video button
+                            logger.info(f"📤 Sending click command for TikTok next video button: {next_video_selector}")
+                            await self.command_sender.send_click_command(
+                                ctx.room,
+                                participant,
+                                {
+                                    "selector": next_video_selector,
+                                    "method": "tiktok_next_video",
+                                    "text": "Next video",
+                                    "fallback": "scroll_down"  # If button not found, scroll instead
+                                }
+                            )
+
+                            logger.info("✅ Next video navigation command sent!")
+                            self.last_scroll_time = time.time()
+                            self.video_start_time = time.time()  # Reset video timer
+                            elapsed = time.time() - nav_start
+                            logger.info(f"✅ Navigation command sent ({elapsed:.2f}s)")
+
+                        except Exception as e:
+                            logger.error(f"❌ Error sending navigation command: {type(e).__name__}: {str(e)}")
 
             except Exception as e:
-                logger.error(f"Error processing frame: {e}", exc_info=True)
+                # Don't use exc_info=True here to avoid logging frame/image data
+                logger.error(f"Error processing frame: {type(e).__name__}: {str(e)}")
+
+    def _get_navigation_url(self) -> Optional[str]:
+        """
+        Get URL for navigation with fallback if not set
+
+        Returns:
+            URL string or None if no URL available
+        """
+        # If we have a current URL, use it
+        if self.current_url and self.current_url.strip():
+            return self.current_url
+
+        # Otherwise, return a default TikTok URL
+        # This allows MCP to work even without specific video URL
+        logger.info("ℹ️  No specific URL set, using fallback: https://www.tiktok.com")
+        return "https://www.tiktok.com"
+
+    def _detect_platform(self, url: str) -> str:
+        """
+        Detect social media platform from URL
+
+        Args:
+            url: Page URL
+
+        Returns:
+            Platform name (TikTok, YouTube Shorts, Instagram Reels, etc.)
+        """
+        url_lower = url.lower()
+
+        if "tiktok.com" in url_lower:
+            return "TikTok"
+        elif "youtube.com/shorts" in url_lower or "youtu.be" in url_lower:
+            return "YouTube Shorts"
+        elif "instagram.com/reels" in url_lower or "instagram.com/reel" in url_lower:
+            return "Instagram Reels"
+        elif "facebook.com" in url_lower or "fb.com" in url_lower:
+            return "Facebook"
+        elif "twitter.com" in url_lower or "x.com" in url_lower:
+            return "Twitter/X"
+        elif "reddit.com" in url_lower:
+            return "Reddit"
+        else:
+            return "Unknown"
 
     async def handle_data_message(self, ctx: JobContext, data: bytes, participant: rtc.RemoteParticipant):
         """Handle data messages from extension"""
@@ -359,10 +436,10 @@ def main():
         logger.error("Please set them in your .env file")
         return
 
-    # Check for Anthropic API key
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        logger.error("Missing ANTHROPIC_API_KEY. Please set it in your .env file")
-        logger.error("Get your API key from: https://console.anthropic.com")
+    # Check for OpenAI API key
+    if not os.getenv("OPENAI_API_KEY"):
+        logger.error("Missing OPENAI_API_KEY. Please set it in your .env file")
+        logger.error("Get your API key from: https://platform.openai.com/api-keys")
         return
 
     agent = ContentFilterAgent()

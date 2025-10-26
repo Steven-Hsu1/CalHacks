@@ -29,16 +29,21 @@ class VideoAnalyzer:
     """Analyzes video frames using vision LLMs to detect content triggers"""
 
     def __init__(self):
-        # Use Anthropic Claude for vision analysis
-        from anthropic import AsyncAnthropic
+        # Use OpenAI GPT-4o for vision analysis
+        from openai import AsyncOpenAI
 
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+            raise ValueError("OPENAI_API_KEY environment variable is required")
 
-        self.client = AsyncAnthropic(api_key=api_key)
-        self.model = "claude-3-5-sonnet-20241022"
-        logger.info("Using Anthropic Claude 3.5 Sonnet for vision analysis")
+        # Suppress OpenAI library logging to avoid image data in logs
+        import logging as openai_logging
+        openai_logging.getLogger("openai").setLevel(openai_logging.WARNING)
+        openai_logging.getLogger("httpx").setLevel(openai_logging.WARNING)
+
+        self.client = AsyncOpenAI(api_key=api_key)
+        self.model = "gpt-4o"  # GPT-4o has excellent vision capabilities
+        logger.info("Using OpenAI GPT-4o for vision analysis")
 
         # For video end detection
         self.previous_frame_data = None
@@ -70,8 +75,8 @@ class VideoAnalyzer:
             # Create prompt
             prompt = self._create_detection_prompt(triggers)
 
-            # Analyze with Claude
-            result = await self._analyze_with_claude(image_data, prompt)
+            # Analyze with OpenAI
+            result = await self._analyze_with_openai(image_data, prompt)
 
             # Add video_ended flag to result
             result.video_ended = video_ended
@@ -79,7 +84,8 @@ class VideoAnalyzer:
             return result
 
         except Exception as e:
-            logger.error(f"Error analyzing frame: {e}", exc_info=True)
+            # Don't use exc_info=True here to avoid logging image data in traceback
+            logger.error(f"Error analyzing frame: {type(e).__name__}: {str(e)}")
             return DetectionResult(
                 trigger_detected=False,
                 trigger_name=None,
@@ -211,13 +217,17 @@ Analyze the image carefully and look for:
 Respond in JSON format:
 {{
     "trigger_detected": true/false,
-    "trigger_name": "name of detected trigger" or null,
+    "trigger_name": "EXACT trigger name from the list above" or null,
     "confidence": 0.0-1.0,
     "description": "brief description of what you see in the frame"
 }}
 
-Be accurate and only report a detection if you're reasonably confident (>0.7) the trigger is present.
-If you detect multiple triggers, report the most prominent one.
+CRITICAL RULES:
+1. If trigger_detected is true, trigger_name MUST be one of the EXACT trigger names from the list: {triggers_str}
+2. Do NOT invent new category names - use the exact trigger string provided
+3. Only report a detection if you're reasonably confident (>0.7) the trigger is present
+4. If you detect multiple triggers, report the most prominent one
+5. If no trigger is detected, set trigger_detected to false and trigger_name to null
 
 IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
 
@@ -232,20 +242,30 @@ IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
             Base64 encoded image string
         """
         try:
-            # Convert frame buffer to PIL Image
-            # The frame.data gives us the raw buffer
-            # We need to handle the conversion based on frame format
-
             # Get frame dimensions
             width = frame.width
             height = frame.height
 
-            # Convert to RGB format
-            # Note: This assumes ARGB format from LiveKit
-            # Adjust if your frames are in a different format
-            buffer = frame.data
+            logger.debug(f"Converting frame: {width}x{height}, format: {frame.type}")
 
-            # Create PIL Image
+            # Convert LiveKit frame to ARGB format (most compatible)
+            # This handles any input format (I420, NV12, ARGB, etc.)
+            argb_frame = frame.convert(rtc.VideoBufferType.RGBA)
+
+            # Get the converted buffer data
+            buffer = argb_frame.data
+
+            # Calculate expected buffer size
+            expected_size = width * height * 4  # RGBA = 4 bytes per pixel
+            actual_size = len(buffer)
+
+            logger.debug(f"Buffer size: expected={expected_size}, actual={actual_size}")
+
+            # Verify buffer size
+            if actual_size < expected_size:
+                raise ValueError(f"Buffer too small: expected {expected_size} bytes, got {actual_size} bytes")
+
+            # Create PIL Image from RGBA buffer
             img = Image.frombytes('RGBA', (width, height), bytes(buffer))
 
             # Convert to RGB (remove alpha channel)
@@ -259,27 +279,38 @@ IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
                 logger.debug(f"Resized frame from {width}x{height} to {img.width}x{img.height}")
 
             # Convert to JPEG bytes
-            buffer = io.BytesIO()
-            img.save(buffer, format='JPEG', quality=85)
-            img_bytes = buffer.getvalue()
+            jpeg_buffer = io.BytesIO()
+            img.save(jpeg_buffer, format='JPEG', quality=85)
+            img_bytes = jpeg_buffer.getvalue()
 
             # Encode to base64
             base64_str = base64.b64encode(img_bytes).decode('utf-8')
 
+            logger.debug(f"Successfully converted frame to base64 (JPEG size: {len(img_bytes)} bytes)")
+
             return base64_str
 
         except Exception as e:
-            logger.error(f"Error converting frame to base64: {e}", exc_info=True)
+            # Don't use exc_info=True here to avoid logging buffer data
+            logger.error(f"Error converting frame to base64: {type(e).__name__}: {str(e)}")
+            logger.error(f"Frame info: width={frame.width}, height={frame.height}, type={frame.type}")
             raise
-
-    async def _analyze_with_claude(
+    
+    async def _analyze_with_openai(
         self,
         image_data: str,
         prompt: str
     ) -> DetectionResult:
-        """Analyze image using Anthropic Claude"""
+        """Analyze image using OpenAI GPT-4o"""
         try:
-            response = await self.client.messages.create(
+            # Create data URL for OpenAI (NOT logged to avoid terminal clutter)
+            data_url = f"data:image/jpeg;base64,{image_data}"
+
+            # Note: Logging minimal info to avoid printing base64 image data
+            logger.info("   🔄 Sending to OpenAI GPT-4o...")
+
+            # Make API call with image data (library logging suppressed in __init__)
+            response = await self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=300,
                 messages=[
@@ -287,11 +318,10 @@ IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
                         "role": "user",
                         "content": [
                             {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/jpeg",
-                                    "data": image_data
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": data_url,
+                                    "detail": "low"  # Use low detail for faster processing
                                 }
                             },
                             {
@@ -300,12 +330,15 @@ IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
                             }
                         ]
                     }
-                ]
+                ],
+                response_format={"type": "json_object"}  # Request JSON response
             )
+
+            logger.info("   ✓ OpenAI response received")
 
             # Parse JSON response
             import json
-            result_text = response.content[0].text.strip()
+            result_text = response.choices[0].message.content.strip()
 
             # Remove markdown code blocks if present
             if result_text.startswith("```"):
@@ -324,5 +357,6 @@ IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
             )
 
         except Exception as e:
-            logger.error(f"Error in Claude analysis: {e}", exc_info=True)
+            # Don't use exc_info=True here to avoid logging image data
+            logger.error(f"Error in OpenAI analysis: {type(e).__name__}: {str(e)}")
             raise

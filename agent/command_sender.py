@@ -148,6 +148,47 @@ class CommandSender:
         except Exception as e:
             logger.error(f"Error sending error message: {e}")
 
+    async def send_navigation_command(
+        self,
+        room: rtc.Room,
+        participant: rtc.RemoteParticipant,
+        action: Dict
+    ):
+        """
+        Send navigation command to extension (scroll, key press, etc.)
+
+        Args:
+            room: LiveKit room
+            participant: Target participant
+            action: Dict with action details from AI Navigator:
+                {
+                    "action": "scroll" | "click" | "key",
+                    "target": "down" | "up" | "ArrowDown" | selector,
+                    "reasoning": "explanation",
+                    "platform": "TikTok"
+                }
+        """
+        try:
+            command = {
+                "type": "NAVIGATE_NEXT",
+                "action": action.get("action", "scroll"),
+                "target": action.get("target", "down"),
+                "platform": action.get("platform", "Unknown"),
+                "reasoning": action.get("reasoning", ""),
+                "timestamp": self._get_timestamp(),
+                "command_id": self._get_command_id()
+            }
+
+            await self._send_data(room, participant, command)
+
+            logger.info(
+                f"🧭 Sent navigation command #{command['command_id']}: "
+                f"{action.get('action')} {action.get('target')} on {action.get('platform')}"
+            )
+
+        except Exception as e:
+            logger.error(f"Error sending navigation command: {type(e).__name__}: {str(e)}")
+
     async def send_scroll_command(
         self,
         room: rtc.Room,
@@ -155,7 +196,7 @@ class CommandSender:
         scroll_config: Dict
     ):
         """
-        Send scroll command to extension
+        Send scroll command to extension (deprecated - use send_navigation_command)
 
         Args:
             room: LiveKit room
@@ -198,6 +239,11 @@ class CommandSender:
             data: Data to send (will be JSON encoded)
         """
         try:
+            # Check if room is still connected
+            if not room.isconnected():
+                logger.warning(f"Cannot send data - room disconnected")
+                return
+
             # Encode data as JSON
             payload = json.dumps(data).encode('utf-8')
 
@@ -211,8 +257,8 @@ class CommandSender:
             logger.debug(f"Data sent: {data.get('type')} -> {participant.identity}")
 
         except Exception as e:
-            logger.error(f"Failed to send data: {e}", exc_info=True)
-            raise
+            # Don't use exc_info=True to avoid logging large data payloads
+            logger.error(f"Failed to send data: {type(e).__name__}: {str(e)}")
 
     async def broadcast_data(
         self,
@@ -227,6 +273,11 @@ class CommandSender:
             data: Data to broadcast
         """
         try:
+            # Check if room is still connected
+            if not room.isconnected():
+                logger.warning(f"Cannot broadcast data - room disconnected")
+                return
+
             payload = json.dumps(data).encode('utf-8')
 
             await room.local_participant.publish_data(
@@ -238,7 +289,7 @@ class CommandSender:
             logger.debug(f"Data broadcast: {data.get('type')}")
 
         except Exception as e:
-            logger.error(f"Failed to broadcast data: {e}")
+            logger.error(f"Failed to broadcast data: {type(e).__name__}: {str(e)}")
             raise
 
     def _get_timestamp(self) -> int:

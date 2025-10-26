@@ -26,7 +26,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case 'START_CAPTURE':
       // No streamId needed - getDisplayMedia handles everything
-      handleStartCapture(message.triggers)
+      handleStartCapture(message.triggers, message.url)
         .then(() => sendResponse({ success: true }))
         .catch(error => sendResponse({ success: false, error: error.message }));
       return true; // Keep channel open for async response
@@ -41,13 +41,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       updateTriggers(message.triggers);
       sendResponse({ success: true });
       return false;
+
+    case 'URL_UPDATE':
+      handleURLUpdate(message.url, message.platform);
+      sendResponse({ success: true });
+      return false;
   }
 });
 
 // Start media capture and LiveKit connection
-async function handleStartCapture(triggers) {
+async function handleStartCapture(triggers, url) {
   try {
     console.log('[Offscreen] Starting capture...');
+    console.log('[Offscreen] 📍 Tab URL:', url);
 
     if (isCapturing) {
       console.log('[Offscreen] Already capturing');
@@ -108,7 +114,7 @@ async function handleStartCapture(triggers) {
     });
 
     // Connect to LiveKit
-    await connectToLiveKit(mediaStream, triggers);
+    await connectToLiveKit(mediaStream, triggers, url);
 
     isCapturing = true;
 
@@ -155,26 +161,40 @@ async function handleStopCapture() {
 }
 
 // Connect to LiveKit room
-async function connectToLiveKit(stream, triggers) {
+async function connectToLiveKit(stream, triggers, url) {
   try {
     console.log('[Offscreen] 🔌 Connecting to LiveKit...');
+    console.log('[Offscreen] 🔍 Debug Info:');
+    console.log('  - Target URL:', LIVEKIT_CONFIG.url);
+    console.log('  - Stream active:', stream.active);
+    console.log('  - Video tracks:', stream.getVideoTracks().length);
 
     // Get token from service worker
+    console.log('[Offscreen] 📤 Requesting token from background service worker...');
     const tokenResponse = await chrome.runtime.sendMessage({
       type: 'GET_LIVEKIT_TOKEN'
     });
 
-    if (!tokenResponse.success) {
-      throw new Error('Failed to get LiveKit token: ' + tokenResponse.error);
+    console.log('[Offscreen] 📥 Token response:', tokenResponse ? 'received' : 'null');
+
+    if (!tokenResponse || !tokenResponse.success) {
+      const error = tokenResponse?.error || 'No response from background service worker';
+      console.error('[Offscreen] ❌ Token fetch failed:', error);
+      throw new Error('Failed to get LiveKit token: ' + error);
     }
 
     const token = tokenResponse.token;
-    console.log('[Offscreen] ✅ Got LiveKit token');
+    console.log('[Offscreen] ✅ Got LiveKit token (length:', token?.length || 0, ')');
+
+    if (!token) {
+      throw new Error('Token is empty or undefined');
+    }
 
     // LiveKit SDK is already imported at the top
     console.log('[Offscreen] ✅ LiveKit SDK loaded');
 
     // Create room
+    console.log('[Offscreen] 🏗️  Creating LiveKit room instance...');
     livekitRoom = new Room({
       adaptiveStream: true,
       dynacast: true,
@@ -184,12 +204,21 @@ async function connectToLiveKit(stream, triggers) {
     });
 
     // Set up event listeners
+    console.log('[Offscreen] 🎧 Setting up room event listeners...');
     setupRoomEventListeners();
 
     // Connect to room
     console.log('[Offscreen] 🔌 Connecting to room:', LIVEKIT_CONFIG.url);
+    console.log('[Offscreen] ⏳ This may take a few seconds...');
+
     await livekitRoom.connect(LIVEKIT_CONFIG.url, token);
+
     console.log('[Offscreen] ✅ Connected to LiveKit room!');
+    console.log('[Offscreen] 📊 Room info:', {
+      name: livekitRoom.name,
+      state: livekitRoom.state,
+      numParticipants: livekitRoom.participants.size
+    });
 
     notifyServiceWorker({
       type: 'CAPTURE_STATUS',
@@ -220,15 +249,11 @@ async function connectToLiveKit(stream, triggers) {
       status: 'publishing'
     });
 
-    // Send initial triggers to agent with URL
-    console.log('[Offscreen] 📤 Sending initial triggers and URL to agent...');
-
-    // Get current tab URL - IMPORTANT for MCP to work
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const url = tabs[0]?.url || '';
-
-      console.log('[Offscreen] 📍 Current tab URL:', url);
+    // Wait a bit for agent to be ready, then send initial triggers with URL
+    console.log('[Offscreen] ⏳ Waiting for agent to be ready...');
+    setTimeout(() => {
+      console.log('[Offscreen] 📤 Sending initial triggers and URL to agent...');
+      console.log('[Offscreen] 📍 URL:', url);
 
       if (triggers && triggers.length > 0) {
         console.log('[Offscreen] 🏷️  Triggers:', triggers);
@@ -245,9 +270,7 @@ async function connectToLiveKit(stream, triggers) {
           url
         });
       }
-    } catch (error) {
-      console.error('[Offscreen] ❌ Failed to get tab URL:', error);
-    }
+    }, 2000); // Wait 2 seconds for agent to be ready
 
   } catch (error) {
     console.error('[Offscreen] ❌ Failed to connect to LiveKit:', error);
@@ -303,20 +326,9 @@ function setupRoomEventListeners() {
     }
   });
 
-  // Periodically send URL updates (in case user navigates)
-  // More frequent updates for better MCP reliability
-  setInterval(async () => {
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const url = tabs[0]?.url || '';
-      if (url) {
-        console.log('[Offscreen] 🔄 Periodic URL update:', url);
-        sendDataToAgent({ type: 'URL_UPDATE', url });
-      }
-    } catch (error) {
-      console.error('[Offscreen] ❌ URL update failed:', error);
-    }
-  }, 5000); // Every 5 seconds (reduced from 10 for better responsiveness)
+  // Note: Periodic URL updates disabled because offscreen documents can't access tabs
+  // If user navigates to a new page, they should restart monitoring
+  // TODO: Implement message passing from background script for URL updates
 }
 
 // Send data to LiveKit agent
@@ -339,6 +351,13 @@ function sendDataToAgent(data) {
 function updateTriggers(triggers) {
   console.log('[Offscreen] 🔄 Updating triggers:', triggers);
   sendDataToAgent({ type: 'UPDATE_TRIGGERS', triggers });
+}
+
+// Handle URL updates from background script
+function handleURLUpdate(url, platform) {
+  console.log('[Offscreen] 📍 URL updated:', url);
+  console.log('[Offscreen] 📍 Platform:', platform);
+  sendDataToAgent({ type: 'URL_UPDATE', url, platform });
 }
 
 // Notify service worker of events
