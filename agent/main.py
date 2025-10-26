@@ -51,8 +51,8 @@ class ContentFilterAgent:
 
         # Time-based video tracking for auto-looping platforms (like TikTok)
         self.video_start_time = time.time()
-        # TikTok videos are typically 15-60s, default to 15s for faster navigation
-        self.max_video_watch_duration = float(os.getenv("MAX_VIDEO_WATCH_DURATION", "15"))
+        # TikTok videos are typically 15-60s, default to 10s for faster navigation
+        self.max_video_watch_duration = float(os.getenv("MAX_VIDEO_WATCH_DURATION", "10"))
 
     async def entrypoint(self, ctx: JobContext):
         """Agent entry point when participant joins room"""
@@ -168,7 +168,6 @@ class ContentFilterAgent:
         frame_count = 0
         processed_count = 0
         last_processed_time = 0
-        fps_limit = 2  # Process 2 frames per second for faster response
 
         async for frame_event in video_stream:
             try:
@@ -180,7 +179,14 @@ class ContentFilterAgent:
                 if frame_count % 30 == 0:
                     logger.info(f"📊 Received {frame_count} frames total, processed {processed_count}")
 
-                # Time-based throttling: only process 1 frame per second
+                # Dynamic FPS: process more frequently near video end
+                time_elapsed = time.time() - self.video_start_time
+                if time_elapsed > 7:  # Last 3 seconds of 10s video
+                    fps_limit = 4  # Check 4 times per second for quick detection
+                else:
+                    fps_limit = 2  # Normal rate for first 7 seconds
+
+                # Time-based throttling based on dynamic fps_limit
                 current_time = time.time()
                 if current_time - last_processed_time < (1.0 / fps_limit):
                     continue  # Skip this frame, not time yet
@@ -261,6 +267,10 @@ class ContentFilterAgent:
                         elapsed = time.time() - start_time
                         logger.info(f"✅ Click commands sent ({elapsed:.2f}s)")
 
+                        # Reset video timer since we're moving to next video
+                        self.video_start_time = time.time()
+                        self.last_scroll_time = time.time()
+
                     except Exception as e:
                         logger.error(f"❌ Error sending click commands: {type(e).__name__}: {str(e)}")
 
@@ -282,9 +292,9 @@ class ContentFilterAgent:
                         logger.info(f"⏱️  TikTok video watched for {time_elapsed:.1f}s (max: {self.max_video_watch_duration}s)")
                         logger.info(f"✅ No trigger detected in this video - skipping to next")
 
-                    # Check if we should navigate (rate limiting)
+                    # Check if we should navigate (minimal rate limiting for faster response)
                     time_since_scroll = time.time() - self.last_scroll_time
-                    min_interval = 2.0  # Minimum 2 seconds between navigations
+                    min_interval = 0.5  # Reduced to 0.5 seconds for faster navigation
 
                     if time_since_scroll < min_interval:
                         logger.info(f"⏸️  Rate limiting: waiting {min_interval - time_since_scroll:.1f}s before next navigation")

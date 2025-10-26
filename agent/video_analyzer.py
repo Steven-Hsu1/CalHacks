@@ -208,11 +208,21 @@ IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
 Your task is to detect if the frame contains any of these user-specified content triggers:
 {triggers_str}
 
-Analyze the image carefully and look for:
-- Visual content (objects, people, actions, scenes, activities)
-- Text overlays, captions, or subtitles
-- Context and setting
-- Any symbols or imagery related to the triggers
+STRICT DETECTION RULES:
+1. Only detect a trigger if it is EXPLICITLY present in the frame
+2. The trigger word must be:
+   - Clearly visible in text/captions/overlays, OR
+   - Shown as a logo/brand name, OR
+   - The actual thing itself (e.g., if trigger is "valorant", the actual Valorant game must be shown)
+3. Do NOT detect based on:
+   - Vague associations or similar topics
+   - Related content that doesn't explicitly show/mention the trigger
+   - General categories (e.g., don't detect "valorant" just because it's any FPS game)
+
+Examples:
+- Trigger "valorant": ONLY detect if you see the word "Valorant", Valorant logo, or actual Valorant gameplay
+- Trigger "nike": ONLY detect if you see Nike logo, Nike products with visible branding, or "Nike" text
+- Trigger "cooking": ONLY detect if someone is actually cooking or the word "cooking" appears
 
 Respond in JSON format:
 {{
@@ -224,10 +234,10 @@ Respond in JSON format:
 
 CRITICAL RULES:
 1. If trigger_detected is true, trigger_name MUST be one of the EXACT trigger names from the list: {triggers_str}
-2. Do NOT invent new category names - use the exact trigger string provided
-3. Only report a detection if you're reasonably confident (>0.7) the trigger is present
-4. If you detect multiple triggers, report the most prominent one
-5. If no trigger is detected, set trigger_detected to false and trigger_name to null
+2. Be VERY conservative - when in doubt, set trigger_detected to false
+3. Only report a detection if you're highly confident (>0.85) the trigger is EXPLICITLY present
+4. The trigger must be the MAIN subject or clearly visible, not a minor background element
+5. If no trigger is EXPLICITLY detected, set trigger_detected to false and trigger_name to null
 
 IMPORTANT: Respond ONLY with the JSON, no additional text or explanation."""
 
